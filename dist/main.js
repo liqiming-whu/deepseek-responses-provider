@@ -160,24 +160,44 @@ async function calculateInputTokens(event) {
 }
 
 // ---------------------------------------------------------------------------
-// httpStreamRequest：流式 HTTP 通道（v1.0.5）
+// httpStreamRequest：流式 HTTP 通道（v1.0.5）+ 硬超时兜底（v1.0.6）
 // 官方 DeepseekProvider 用 OkHttp readTimeout=1000s + charStream 逐行流式读取，
 // readTimeout 语义是"行间空闲"，SSE 持续推流就不会误杀长思考。
 // 插件侧等价实现：toolCall("http_request", params, {onIntermediateResult}) ->
 // callToolAsyncStreaming -> http_request.invokeAndStream -> 逐 chunk 返回。
 // 最终 resolve 仍是完整响应对象（{statusCode, content, ...}），超时/异常会 reject。
+// v1.0.6: 流式 toolCall 在 provider 沙箱（dispatchIntermediateOnMain=false）下可能
+// Promise 永不 resolve（静默挂起），Operit 前端表现为"无错误文本的中断"。
+// 因此加硬超时兜底：read_timeout + 60s 内未完成则强制 reject 并带 elapsedMs 诊断，
+// 确保中断时一定返回可定位的错误文本而不是静默断流。
 // 若环境不支持流式 toolCall（无 onIntermediateResult 通道），回退 Tools.Net.http。
 // ---------------------------------------------------------------------------
 function httpStreamRequest(opts) {
     return new Promise(function (resolve, reject) {
         var done = false;
+        var reqStartTs = Date.now();
         function settle(fn, val) {
             if (done) return;
             done = true;
             try { fn(val); } catch (e) { /* ignore */ }
         }
+        // 硬超时兜底：超过 read_timeout + 60s 仍未完成 -> 强制 reject（防挂起）
+        var hardTimeoutMs = (Number(opts.read_timeout) || 120) * 1000 + 60000;
+        var hardTimer = setTimeout(function () {
+            if (done) return;
+            var err = new Error("httpStreamRequest timed out after " +
+                ((Date.now() - reqStartTs) / 1000).toFixed(1) + "s (hard cap " +
+                Math.round(hardTimeoutMs / 1000) + "s); channel=" + (opts._channel || "unknown"));
+            err._elapsedMs = Date.now() - reqStartTs;
+            settle(reject, err);
+        }, hardTimeoutMs);
+        function finalize() {
+            if (hardTimer) { clearTimeout(hardTimer); hardTimer = null; }
+        }
         try {
             if (typeof toolCall === "function") {
+                opts._channel = "stream";
+                if (opts._onChannel) { try { opts._onChannel("stream"); } catch (e) { /* ignore */ } }
                 var params = {
                     url: opts.url,
                     method: opts.method,
@@ -193,15 +213,25 @@ function httpStreamRequest(opts) {
                         void evt;
                     },
                 }).then(function (finalResp) {
+                    finalize();
                     settle(resolve, finalResp);
                 }).catch(function (err) {
+                    finalize();
                     settle(reject, err);
                 });
             } else {
-                Tools.Net.http(opts).then(function (r) { settle(resolve, r); })
-                    .catch(function (e) { settle(reject, e); });
+                opts._channel = "fallback";
+                if (opts._onChannel) { try { opts._onChannel("fallback"); } catch (e) { /* ignore */ } }
+                Tools.Net.http(opts).then(function (r) {
+                    finalize();
+                    settle(resolve, r);
+                }).catch(function (e) {
+                    finalize();
+                    settle(reject, e);
+                });
             }
         } catch (e) {
+            finalize();
             settle(reject, e);
         }
     });
@@ -269,6 +299,7 @@ async function sendMessage(event) {
     var functionCalls = {};
     var functionCallOrder = [];
     var reqStart = Date.now();
+    var reqChannel = "";
 
     try {
         var resp = await httpStreamRequest({
@@ -281,10 +312,14 @@ async function sendMessage(event) {
             // 流式通道（callToolAsyncStreaming -> http_request.invokeAndStream）下
             // readTimeout 是"chunk 间空闲"而非"整请求空闲"：DeepSeek thinking 模式
             // 持续推 reasoning delta，连接保持活跃，长会话不再被读超时误杀。
+            // v1.0.6: 流式 toolCall 可能挂起（Promise 不 resolve），httpStreamRequest
+            // 内部已有硬超时兜底 + channel 标记；此处通过 _onChannel 回调记录实际通道。
             read_timeout: 1000,
             validateStatus: false,
+            _onChannel: function (ch) { reqChannel = ch; },
         });
         diag.elapsedMs = Date.now() - reqStart;
+        diag.channel = reqChannel;
         var status = Number(resp && resp.statusCode);
         var raw = String((resp && resp.content) || "");
         if (status < 200 || status >= 300) {
@@ -308,7 +343,8 @@ async function sendMessage(event) {
             } catch (e) { /* 忽略解析失败 */ }
         }
     } catch (e) {
-        diag.elapsedMs = Date.now() - reqStart;
+        diag.elapsedMs = (e && e._elapsedMs) ? e._elapsedMs : (Date.now() - reqStart);
+        diag.channel = reqChannel || "unknown";
         return { text: "Provider error: " + String((e && e.message) || e) + "\n[diag] " + JSON.stringify(diag), actualUrl: endpoint };
     }
 
