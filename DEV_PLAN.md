@@ -29,6 +29,17 @@
 - 验证：`node --check` 通过；npm test 全通过；打包归档仅 3 文件（v1.0.4，27530B）；2026-08-13 17:51 烧录成功（`enabled=true`、`related_load_errors={}`）。Git：commit `cdd369d` + tag `v1.0.4` 已推送。
 - 待办：真机长会话（>10 轮、body>100 万字符）回归；若仍中断，靠 `elapsedMs` 确认是超时还是前端中断，再决定是否继续提高 timeout 或改为流式逐行读取（Tools.Net.http 一次性返回完整流，无增量读取接口时只能靠大 timeout 兜底）。
 
+## 2026-08-13 对照实验确认根因：官方 chat API 健壮 = 1000s 超时 + 流式读取（v1.0.4 → v1.0.5 治本）
+
+- 状态：**v1.0.5 已烧录（2026-08-13 17:57）**；待真机验证。
+- 对照实验（用户操作，2026-08-13 17:53）：同一超长会话历史下，从插件自定义 Provider 切到官方内置 DeepSeek Provider 后不再中断 → 证明官方 chat API 实现健壮，中断与模型/会话无关，是插件 HTTP 层实现差异。
+- 证据（源码对照，/root/operit）：
+  - 官方 `AIServiceFactory.kt:204`：`.readTimeout(1000, TimeUnit.SECONDS)` = **1000s**；`OpenAIProvider.kt:2586` 用 `responseBody.charStream().buffered()` + `readLine()` **逐行流式读取**（readTimeout 语义=行间空闲，SSE 持续推流不超时）。
+  - 插件旧实现：`Tools.Net.http` → `JsTools.kt` 里 `toolCall("http_request", params)`（无 onIntermediateResult）→ `StandardHttpTools.httpRequest` → `responseBody.bytes()` **一次性读完整响应** + `read_timeout=120`（整请求空闲）→ DeepSeek 思考 100 万字符时无字节到达即超时。
+- 修复（v1.0.5）：新增 `httpStreamRequest()`——走 `toolCall("http_request", params, {onIntermediateResult})` → `callToolAsyncStreaming` → `http_request.invokeAndStream`（`httpRequestStream` 逐 chunk），readTimeout 语义变为 chunk 间空闲；`read_timeout` 提到 **1000s** 对齐官方；`toolCall` 不可用时回退 `Tools.Net.http`。保留 v1.0.4 的 `elapsedMs` 诊断。
+- 验证：`node --check`、npm test 全通过；归档仅 3 文件（v1.0.5，29901B）；2026-08-13 17:57 烧录成功（`enabled=true`、`related_load_errors={}`）。Git commit `7fb1518` + tag `v1.0.5` 已推送。
+- 待办：重启 Operit → 启用插件 → 超长会话（>100 万字符）多轮工具调用回归；重点确认不再出现"工具调用前中断"。
+
 ## 2026-08-13 并行回归观察（v0.6.2 → v1.0.0 基线）
 
 干净会话多轮 4 工具并行回归总体可靠：文件读写、网络、搜索、记忆类工具均可正常发起并返回，无 Provider 丢调用、无 call_id 失配。以下两个注意点单独记录。
