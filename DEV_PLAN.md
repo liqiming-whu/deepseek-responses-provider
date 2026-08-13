@@ -83,7 +83,18 @@
 - 待办（v1.0.7）：对照官方 `DeepseekProvider.kt` 的 `queuedAssistantReasoning`+`queuedToolCalls` 缓冲语义，确认纯 think turn 正确处理（保留为 reasoning item 而非丢弃），并在长会话尾部形状下回归。
 - 注意：400 与"工具调用前中断"（超时/挂起）是两条独立问题链；本次 400 与 v1.0.6 的流式/超时修复无关。
 
-|## 2026-08-13 v1.0.9 修复工具调用回归：<tool> XML 流式上报（中断链第二层根因）
+|- 待办（长期验证）：**用户判定偶发 400 + 中断是否真正修复不能下定论，需长时间使用测试**（60 轮级长会话 + 日常使用）。首轮 5 轮短测试（20:56）：R1/R2/R3/R5 工具调用全部成功、无插件中断、无 400；R4 正文过长触发模型输出预算截断（非插件缺陷）。v1.0.10 为最新已烧录版，修复机制在短测试内未复现问题，长期稳定性待验证。后续长时间使用若复现 400/中断，记录 diag（bodyLength/elapsedMs/channel/histTail/inputSummary）到本文件并继续迭代。
+
+## 2026-08-13 v1.0.9 下 400 复现（channel=stream, bodyLength=466305）——工具调用已执行，400 链重新触发
+
+- 状态：**已记录（2026-08-13 20:44）**；v1.0.9 工具调用回归修复生效（terminal 执行成功），但下一轮请求 400。
+- 现象：用户重启后测"5 轮思考+工具调用交替"第 1 轮：插件确认版本（VERSION 1.0.9、toolXml=True）+ terminal 工具**成功执行**；随后插件生成下一条回复时 HTTP 400 `reasoning_text must be passed back`。
+- 证据（真机 diag）：`bodyLength=466305`（46.6 万字符）、`elapsedMs=1891`（快速拒绝）、`channel=stream`。histKinds 尾部 `ASSISTANT, USER, ASSISTANT, TOOL_RESULT`；**inputSummary 尾部为 `user(重启消息), C:call_80(package_proxy), O:call_80`——C:call_80 前无 reasoning 项**。
+- 初步判断：那条含 package_proxy 工具调用的 ASSISTANT 的 thinking 在 buildResponsesInput 中未作为 reasoning 回传（input 里缺对应 reasoning），违反"所有 reasoning_text 必须回传"→ 400。v1.0.7 flushPendingReasoning 未兜住该形态。
+- 待办：读真实历史确认该 ASSISTANT 的实际内容形态（think 与 `<tool>` 的排列）；对照 buildResponsesInput 对该形态的处理；可能是"纯 think ASSISTANT + 后续 TOOL_CALL ASSISTANT"拆分形状在 v1.0.9 工具调用 XML 上报后的新变体。
+- 证据路径：用户贴真机 diag；`buildResponsesInput` 源码；真实消息 metadata。
+
+## 2026-08-13 v1.0.9 修复工具调用回归：<tool> XML 流式上报（中断链第二层根因）
 
 - 状态：**已修复并烧录（2026-08-13 20:41 v1.0.9）**；待用户切回插件 provider 重启回归（思考+工具交替）。
 - 现象：v1.0.8 下纯 think 5 轮自然结束（流式转发生效），但"思考 + 工具调用交替"第 1 轮工具调用发起时仍静默中断。
