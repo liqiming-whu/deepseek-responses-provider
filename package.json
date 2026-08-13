@@ -1,6 +1,6 @@
 {
   "name": "deepseek-responses-provider",
-  "version": "1.0.10",
+  "version": "1.0.11",
   "private": true,
   "description": "DeepSeek via Responses API custom AI provider for Operit",
   "scripts": {

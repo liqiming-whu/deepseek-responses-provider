@@ -2,6 +2,17 @@
 
 > 记录尚未形成 Bug 的观察项与规划。状态：待验证 / 待处理。版本基线：v1.0.2（打包后）。
 
+## 2026-08-13 v1.0.11 修复 400 链：function_call 前必须始终有 reasoning item（空 reasoning 兜底）
+
+- 状态：代码修复 + 结构测试通过 + **v1.0.11 已打包（2026-08-13 23:10）**；待烧录 + 重启 Operit + 真机回归。
+- 现象：v1.0.10 下连续多轮"纯工具调用"（无正文、无 `<think>` 的 ASSISTANT turn）后，下一轮请求 HTTP 400 `reasoning_text must be passed back`。真机 diag：`histKinds` 尾部 `ASSISTANT(纯tool) → TOOL_RESULT → ASSISTANT(纯tool) → TOOL_RESULT`；`inputSummary` 尾部 `reasoning → C:call_6 → O:call_6 → C:call_7 → O:call_7`——**C:call_7 前是 O:call_6，缺 reasoning**。
+- 根因：`pushCall()` 只在 `pendingReasoning` 非空时才输出 reasoning item。当 Operit 把"think"与"tool call"拆开、或纯 tool 轮 think 未进入历史（被拆到其它 turn 或丢失）时，连续两个 function_call 里第二个前面没有 reasoning，违反 DeepSeek Responses thinking 模式"每个 function_call 前必须有 reasoning item"约束 → 400。
+- 修复（v1.0.11，两处最小改动）：
+  1. `pushCall()` **无条件**输出 reasoning item，text 用 `pendingReasoning || ""`（空 reasoning 兜底，对齐官方 `DeepseekProvider.kt` 的 `queueToolCalls` 中 `reasoning_content` 可为空语义）。
+  2. `TOOL_RESULT` 分支先 `splitThinking(content)` 提取并缓冲 think（覆盖 Operit 偶尔把"纯 think"或"think+结果"误标成 TOOL_RESULT turn、被 `extractToolResultsList` 纯文本回退吞掉的情况）。
+- 验证：`node --check` 通过；npm test 全通过（A-I，含新增场景 I「连续纯 tool 无 think 兜底」：`R C:call_0 O:call_0 R C:call_1 O:call_1`，每个 function_call 前都有 R）；打包 `deepseek_responses_provider-v1.0.11.toolpkg`（3 文件，manifest 根目录，12K）。
+- 待办：烧录 v1.0.11 → 重启 Operit → 连续纯工具调用（5 轮级）真机回归；确认 `reasoning_text must be passed back` 400 不再复现。注意：空 reasoning 兜底是否被 DeepSeek 完全接受仍需真机验证（结构测试只能保证无孤立/错序 function_call）。
+
 ## 2026-08-13 偶发 HTTP 400：`reasoning_text in the thinking mode must be passed back`（v1.0.2 → v1.0.3 修复）
 
 - 状态：代码修复 + 结构测试通过 + **v1.0.3 已烧录（2026-08-13 17:17）**；**待 Operit 重启 + 真机长会话回归**（>10 轮连续工具调用）。

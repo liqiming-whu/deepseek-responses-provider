@@ -512,13 +512,16 @@ function buildResponsesInput(chatHistory) {
         pendingReasoning += (pendingReasoning ? "\n" : "") + String(text);
     }
     function pushCall(name, args) {
-        if (pendingReasoning) {
-            input.push({
-                type: "reasoning",
-                content: [{ type: "reasoning_text", text: pendingReasoning }],
-            });
-            pendingReasoning = "";
-        }
+        // v1.0.11: 每个 function_call 前必须输出 reasoning item（对齐官方
+        // DeepseekProvider queueToolCalls 的 reasoning_content 可为空语义）。
+        // 当 Operit 把 think 拆到别的 turn 或丢失时，空 reasoning 兜底，
+        // 避免无前置 reasoning 的 function_call 触发
+        // "reasoning_text must be passed back" 400。
+        input.push({
+            type: "reasoning",
+            content: [{ type: "reasoning_text", text: pendingReasoning || "" }],
+        });
+        pendingReasoning = "";
         var cid = "call_" + (seq++);
         openCallIds.push(cid);
         input.push({
@@ -633,6 +636,14 @@ function buildResponsesInput(chatHistory) {
                 }
             }
         } else if (kind === "TOOL_RESULT") {
+            // v1.0.11: Operit 偶尔把"纯 think"或"think+结果"误标成 TOOL_RESULT turn。
+            // 先提取 think 缓冲，避免 reasoning 被 extractToolResultsList 的纯文本
+            // 回退吞掉，导致后续 function_call 缺少前置 reasoning 触发 400。
+            var trsp = splitThinking(content);
+            if (trsp.thinking) {
+                pushReasoning(trsp.thinking);
+            }
+            content = trsp.plain;
             var hasStructuredResults = /<tool_result(?:_[A-Za-z0-9_]+)?\b/i.test(content);
             // Operit 偶尔会插入一个 typed TOOL_RESULT turn，但内容实际是上一轮
             // assistant 文本 + <tool...> 调用 XML。它不是执行结果，不能消费 FIFO；
