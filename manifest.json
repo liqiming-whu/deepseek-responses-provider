@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "toolpkg_id": "deepseek_responses_provider",
+  "version": "1.0.2",
+  "main": "dist/main.js",
+  "author": ["Operit User"],
+  "display_name": {
+    "zh": "DeepSeek Responses Provider",
+    "en": "DeepSeek Responses Provider",
+    "default": "DeepSeek Responses Provider"
+  },
+  "description": {
+    "zh": "通过官方 Responses API 接入 DeepSeek 的自定义 AI Provider。支持思维过程（reasoning）回传与原生工具调用（function_call/function_call_output）配对，修复内置 OpenAI(Responses API) 类型对 DeepSeek 的工具调用 call_id 失配问题。",
+    "en": "Custom AI Provider that connects DeepSeek via the official Responses API. Supports reasoning streaming and native tool call pairing (function_call/function_call_output).",
+    "default": "DeepSeek via Responses API custom provider"
+  },
+  "enabled_by_default": true
+}

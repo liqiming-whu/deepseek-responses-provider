@@ -1,0 +1,20 @@
+# Build artifacts
+*.toolpkg
+dist/*.bak*
+
+# Dependencies / caches
+node_modules/
+.cache/
+.tmp/
+*.log
+
+# Local secrets and environment
+.env
+.env.*
+!.env.example
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
