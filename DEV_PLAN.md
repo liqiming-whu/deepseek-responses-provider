@@ -19,6 +19,16 @@
 - 自动验证：复用 main.js 提取的 `buildResponsesInput` 独立跑结构测试，覆盖 A 思考+工具同 turn、B 思考/工具分 turn、C 真实尾形状、D 长链多轮、E TOOL_CALL 含 think+tool、F 并行、G 20 轮真实形状——全部 `reasoning 紧跟 function_call`，无孤立 reasoning、无 C 紧跟 O 错序；`node --check` 通过。
 - 待办：打包 v1.0.3 → 烧录 → Operit 重启 → 长会话真机回归（重点：长链工具调用 10+ 轮后不再 400）。
 
+## 2026-08-13 长会话"工具调用前中断"= HTTP 读超时（v1.0.3 → v1.0.4 修复）
+
+- 状态：**v1.0.4 已烧录（2026-08-13 17:51）**；待真机验证。
+- 现象：v1.0.3 后 400 不再出现（压力测试长会话多轮工具调用均通过），但会话仍在**工具调用发起前**偶发中断。
+- 证据（extended_chat 真实消息 metadata，2026-08-13 17:20）：消息尾部为 `Provider error: Error executing HTTP request: timeout`；同一时刻 diag `bodyLength=1014183`（**超 100 万字符**）；`sendMessage()` 的 `read_timeout=120s`。
+- 根因：长会话历史超 100 万字符 + thinking（effort high）模式下，DeepSeek 首 token 延迟可能超过 120s（模型仍在思考、尚未输出 function_call），`Tools.Net.http` 读超时抛异常 → Provider 返回 timeout → Operit 表现为"工具调用前中断"。与 reasoning 400 是不同错误族，v1.0.3 未覆盖。
+- 修复（v1.0.4）：`read_timeout: 120 → 600`；新增 `reqStart`/`diag.elapsedMs`，三条返回路径（成功 / HTTP 错误 / 异常）都带耗时诊断，便于下次定位。
+- 验证：`node --check` 通过；npm test 全通过；打包归档仅 3 文件（v1.0.4，27530B）；2026-08-13 17:51 烧录成功（`enabled=true`、`related_load_errors={}`）。Git：commit `cdd369d` + tag `v1.0.4` 已推送。
+- 待办：真机长会话（>10 轮、body>100 万字符）回归；若仍中断，靠 `elapsedMs` 确认是超时还是前端中断，再决定是否继续提高 timeout 或改为流式逐行读取（Tools.Net.http 一次性返回完整流，无增量读取接口时只能靠大 timeout 兜底）。
+
 ## 2026-08-13 并行回归观察（v0.6.2 → v1.0.0 基线）
 
 干净会话多轮 4 工具并行回归总体可靠：文件读写、网络、搜索、记忆类工具均可正常发起并返回，无 Provider 丢调用、无 call_id 失配。以下两个注意点单独记录。
