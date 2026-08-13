@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "toolpkg_id": "deepseek_responses_provider",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "main": "dist/main.js",
   "author": ["Operit User"],
   "display_name": {

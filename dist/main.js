@@ -460,6 +460,17 @@ async function sendMessage(event) {
     }
     diag.functionCallCount = functionCallOrder.length;
     diag.reasoningLength = reasoningText.length;
+    // v1.0.9: 工具调用 XML 流式上报——Kotlin hasIntermediateTextChunk=true 时
+    // 最终 return 文本被忽略，而 Operit 从 Provider 文本流解析 <tool> 标记识别
+    // 工具调用；此处把渲染后的 <tool> XML 也经 sendIntermediateResult 上报，
+    // 避免工具指令只存在于被忽略的 return 文本里导致静默中断。
+    if (typeof sendIntermediateResult === "function" && functionCallOrder.length > 0) {
+        for (var fx = 0; fx < functionCallOrder.length; fx++) {
+            var fcx = functionCalls[functionCallOrder[fx]];
+            var argsx = fcx.arguments || fcx.snapshotArguments || "{}";
+            sendIntermediateResult({ chunk: renderToolCall(fcx.name, argsx) });
+        }
+    }
 
     return { text: fullText, usage: undefined, actualUrl: endpoint };
 }

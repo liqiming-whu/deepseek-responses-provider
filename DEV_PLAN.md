@@ -83,7 +83,20 @@
 - 待办（v1.0.7）：对照官方 `DeepseekProvider.kt` 的 `queuedAssistantReasoning`+`queuedToolCalls` 缓冲语义，确认纯 think turn 正确处理（保留为 reasoning item 而非丢弃），并在长会话尾部形状下回归。
 - 注意：400 与"工具调用前中断"（超时/挂起）是两条独立问题链；本次 400 与 v1.0.6 的流式/超时修复无关。
 
-|## 2026-08-13 v1.0.8 修复中断链：SSE 流式转发对齐官方（根因：一次性 return 单块过大）
+|## 2026-08-13 v1.0.9 修复工具调用回归：<tool> XML 流式上报（中断链第二层根因）
+
+- 状态：**已修复并烧录（2026-08-13 20:41 v1.0.9）**；待用户切回插件 provider 重启回归（思考+工具交替）。
+- 现象：v1.0.8 下纯 think 5 轮自然结束（流式转发生效），但"思考 + 工具调用交替"第 1 轮工具调用发起时仍静默中断。
+- 根因（源码级验证）：
+  1. Operit 从 Provider 文本流中解析 `<tool>` 标记识别工具调用（`EnhancedAIService.kt` L1422/1456 `ChatMarkupRegex.toolCallPattern.findAll`，并有 `detectAndRepairTruncatedToolRound` 截断容错）。
+  2. v1.0.8 流式转发文本后 Kotlin `hasIntermediateTextChunk=true` → 最终 `return {text}` 被忽略（`ToolPkgJsAiProviderService.kt` L168-172）。
+  3. 插件把 SSE 结构化 function_call 渲染成 `<tool>` XML 只在最终 return 的 fullText 里（`renderToolCall`，L459）→ 被忽略后工具指令从 Provider 流消失 → Operit 解析不到 → 工具不执行 → 静默中断。
+- 修复（方案 B，最小改动）：`sendMessage` return 前，若存在 function_call 且 `sendIntermediateResult` 可用，把每个 `renderToolCall(name, args)` 渲染的 `<tool>` XML 经 `sendIntermediateResult({chunk})` 上报 → `<tool>` 进入 Provider 文本流 → Operit 可解析执行。
+- 验证：`node --check`、npm test A-H、test_sse_forwarder T1-T5 全绿；安装包 VERSION 1.0.9 + 工具 XML 上报×1 + 保留 v1.0.6/1.0.7/1.0.8 全部特征；烧录成功（enabled/imported=true、load_errors={}）。
+- 注：官方 provider 下多次"User cancelled/输出截断"为 deepseek-v4-flash 思考型模型输出预算问题（思考+输出共享上限），非插件缺陷；回归测试时注意控制单轮输出长度。
+- 待办：切回插件重启 → 5 轮思考+工具交替 → 无中断则中断链关闭 → 400 链 60 轮长会话积累。
+
+## 2026-08-13 v1.0.8 修复中断链：SSE 流式转发对齐官方（根因：一次性 return 单块过大）
 
 - 状态：**已修复并烧录（2026-08-13 20:30 v1.0.8）**；待用户切回插件 provider 重启回归。
 - 根因（源码级收敛）：
