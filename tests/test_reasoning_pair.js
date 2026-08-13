@@ -55,7 +55,18 @@ function buildResponsesInput(chatHistory) {
         // 相邻但独立的 turn，且顺序可能是 TOOL_CALL 先于 ASSISTANT(think)；
         // 若边界 flush 清空思考，后续 function_call 将缺少前置 reasoning，
         // 反而触发 DeepSeek "reasoning_text must be passed back" 400。
-        // 残留思考若无 function_call 消费，会在下次真实边界 push 时被丢弃。
+    }
+    // v1.0.7: 真实边界输出残留 reasoning（随后续真实边界，绝不丢弃）。
+    // 对齐官方 DeepseekProvider queuedAssistantReasoning 缓冲语义：无 function_call
+    // 消费的纯 think 也要回传，否则触发 "reasoning_text must be passed back" 400。
+    function flushPendingReasoning() {
+        if (pendingReasoning) {
+            input.push({
+                type: "reasoning",
+                content: [{ type: "reasoning_text", text: pendingReasoning }],
+            });
+            pendingReasoning = "";
+        }
     }
 
     for (var i = 0; i < chatHistory.length; i++) {
@@ -64,9 +75,11 @@ function buildResponsesInput(chatHistory) {
         var content = String((t && t.content) || "");
         if (kind === "SYSTEM") {
             flushCancelled();
+            flushPendingReasoning();
             input.push({ type: "message", role: "developer", content: content });
         } else if (kind === "USER" || kind === "SUMMARY") {
             flushCancelled();
+            flushPendingReasoning();
             input.push({ type: "message", role: "user", content: content });
         } else if (kind === "ASSISTANT") {
             var sp = splitThinking(content);
@@ -149,6 +162,15 @@ function buildResponsesInput(chatHistory) {
 
     // end of history: leftover orphan function_calls -> User cancelled (align flushOpenToolCallsAsCancelled)
     flushCancelled();
+    // v1.0.7: 兜底 —— 残留 pendingReasoning（若有）随后续真实边界输出为 reasoning item，绝不丢弃。
+    // 覆盖"TOOL_CALL 先于 ASSISTANT(think)"等跨 turn 顺序导致 think 未被同批 function_call 消费的场景。
+    if (pendingReasoning) {
+        input.push({
+            type: "reasoning",
+            content: [{ type: "reasoning_text", text: pendingReasoning }],
+        });
+        pendingReasoning = "";
+    }
     return input;
 }
 
@@ -305,8 +327,13 @@ function check(input, name) {
   for (var i = 0; i < input.length; i++) {
     var it = input[i];
     if (it.type === "reasoning") {
+      // v1.0.7: reasoning 既可紧跟 function_call（配对场景），也可随后续真实边界
+      // （USER/message/EOF，纯 think 无 function_call 回传场景）。两种都合法。
+      // 仅拒绝错配：reasoning 后面跟 function_call_output 或另一个 reasoning。
       var nxt = input[i + 1];
-      if (!nxt || nxt.type !== "function_call") violations.push("R@" + i + " followed by " + (nxt ? nxt.type : "EOF"));
+      if (nxt && (nxt.type === "function_call_output" || nxt.type === "reasoning")) {
+        violations.push("R@" + i + " followed by " + nxt.type + " (misorder)");
+      }
     }
     if (it.type === "function_call") {
       // 前一个不应是孤立的 reasoning 缺失：function_call 前应紧邻 reasoning（若有思考）
@@ -380,3 +407,20 @@ var F = [
   { kind: "USER", content: "继续" },
 ];
 check(buildResponsesInput(F), "F 并行+思考");
+
+// 场景 G：纯 think 无 function_call —— reasoning 随后续真实边界回传（v1.0.7）
+var G = [
+  { kind: "SYSTEM", content: "sys" },
+  { kind: "USER", content: "hi" },
+  { kind: "ASSISTANT", content: "<think>纯思考无工具调用</think>" },
+  { kind: "USER", content: "继续" },
+];
+check(buildResponsesInput(G), "G 纯think无function_call");
+
+// 场景 H：纯 think 在历史末尾（无后续 USER）—— 残留 reasoning 兜底回传（v1.0.7）
+var H = [
+  { kind: "SYSTEM", content: "sys" },
+  { kind: "USER", content: "hi" },
+  { kind: "ASSISTANT", content: "<think>末尾纯思考</think>" },
+];
+check(buildResponsesInput(H), "H 末尾纯think");

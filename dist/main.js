@@ -160,6 +160,63 @@ async function calculateInputTokens(event) {
 }
 
 // ---------------------------------------------------------------------------
+// makeSseForwarder：SSE 流式转发（v1.0.8，对齐官方 examples/custom_ai_provider）
+// 官方 Provider 在流式接收每个 delta 时立即 sendIntermediateResult({chunk})，
+// Operit 侧 ToolPkgJsAiProviderService 收到中间结果后 hasIntermediateTextChunk=true，
+// 逐块 emit 到前端流式渲染，且最终 return 的完整 text 被忽略。
+// v1.0.7 及之前：插件只在最后 return {text} 一次性交整段——长 thinking 时
+// fullText（<think>... 几万字符）作为单个 chunk 交给前端渲染管道，触发静默中断
+// （无 error、无 diag，官方 provider 同样场景逐 delta 小块上报则完全正常）。
+// 本函数把流式接收的原始 chunk 实时解析为 SSE delta 并转发，块粒度对齐官方。
+// 兼容：无全局 sendIntermediateResult（旧版 Operit）时返回空操作，维持旧行为。
+// ---------------------------------------------------------------------------
+function makeSseForwarder(sendFn) {
+    var send = sendFn || (typeof sendIntermediateResult === "function" ? sendIntermediateResult : null);
+    if (!send) {
+        return function () { /* 环境不支持流式转发，维持一次性 return */ };
+    }
+    var buffer = "";
+    var MAX_CHUNK = 512; // 单块保护：超长 delta 切分，避免桥接层单块过大
+    function forwardDelta(delta) {
+        var text = String(delta);
+        if (!text) return;
+        if (text.length <= MAX_CHUNK) {
+            send({ chunk: text });
+            return;
+        }
+        for (var i = 0; i < text.length; i += MAX_CHUNK) {
+            send({ chunk: text.slice(i, i + MAX_CHUNK) });
+        }
+    }
+    function onRawChunk(chunkText) {
+        if (!chunkText) return;
+        buffer += chunkText;
+        var sep;
+        while ((sep = buffer.indexOf("\n\n")) >= 0) {
+            var block = buffer.slice(0, sep);
+            buffer = buffer.slice(sep + 2);
+            var lines = block.split(/\r?\n/);
+            for (var k = 0; k < lines.length; k++) {
+                var line = lines[k].trim();
+                if (line.indexOf("data:") !== 0) continue;
+                var payload = line.substring(5).trim();
+                if (!payload || payload === "[DONE]") continue;
+                var evt;
+                try { evt = JSON.parse(payload); } catch (e) { continue; }
+                var type = evt && evt.type;
+                var delta = evt && evt.delta;
+                if (delta && (type === "response.output_text.delta" ||
+                              type === "response.reasoning_text.delta" ||
+                              type === "response.reasoning_summary_text.delta")) {
+                    forwardDelta(delta);
+                }
+            }
+        }
+    }
+    return onRawChunk;
+}
+
+// ---------------------------------------------------------------------------
 // httpStreamRequest：流式 HTTP 通道（v1.0.5）+ 硬超时兜底（v1.0.6）
 // 官方 DeepseekProvider 用 OkHttp readTimeout=1000s + charStream 逐行流式读取，
 // readTimeout 语义是"行间空闲"，SSE 持续推流就不会误杀长思考。
@@ -171,6 +228,7 @@ async function calculateInputTokens(event) {
 // 因此加硬超时兜底：read_timeout + 60s 内未完成则强制 reject 并带 elapsedMs 诊断，
 // 确保中断时一定返回可定位的错误文本而不是静默断流。
 // 若环境不支持流式 toolCall（无 onIntermediateResult 通道），回退 Tools.Net.http。
+// v1.0.8: onIntermediateResult 内把原始 chunk 转发给 opts._onStreamChunk（SSE 转发）。
 // ---------------------------------------------------------------------------
 function httpStreamRequest(opts) {
     return new Promise(function (resolve, reject) {
@@ -209,8 +267,12 @@ function httpStreamRequest(opts) {
                 };
                 toolCall("http_request", params, {
                     onIntermediateResult: function (evt) {
-                        // 流式 chunk 到达即连接活跃，无需累积（最终结果仍完整返回）
-                        void evt;
+                        // v1.0.8: 转发原始 chunk 给 SSE 解析器（对齐官方 Provider 流式上报）。
+                        // v1.0.7 及之前仅 void evt（确认连接活跃），内容在 resolve 后一次性返回，
+                        // 长 thinking 单块过大触发前端静默中断。
+                        if (opts._onStreamChunk && evt && evt.chunk) {
+                            try { opts._onStreamChunk(evt.chunk); } catch (e) { /* ignore */ }
+                        }
                     },
                 }).then(function (finalResp) {
                     finalize();
@@ -300,6 +362,9 @@ async function sendMessage(event) {
     var functionCallOrder = [];
     var reqStart = Date.now();
     var reqChannel = "";
+    // v1.0.8: SSE 流式转发——流式接收的 delta 实时经 sendIntermediateResult 上报，
+    // 避免长 thinking 整段一次性 return 触发前端静默中断（对齐官方 custom_ai_provider）。
+    var forwardSseRaw = makeSseForwarder();
 
     try {
         var resp = await httpStreamRequest({
@@ -317,6 +382,7 @@ async function sendMessage(event) {
             read_timeout: 1000,
             validateStatus: false,
             _onChannel: function (ch) { reqChannel = ch; },
+            _onStreamChunk: forwardSseRaw,
         });
         diag.elapsedMs = Date.now() - reqStart;
         diag.channel = reqChannel;
@@ -404,11 +470,11 @@ async function sendMessage(event) {
 function buildResponsesInput(chatHistory) {
     var input = [];
     var openCallIds = []; // FIFO queue: pending function_call call_ids (align DeepseekProvider.openToolCallIds)
-    // reasoning 缓冲：DeepSeek Responses 要求 reasoning item 必须紧跟 function_call
-    // （"thinking mode 的 reasoning_text 必须回传"，孤立 reasoning 或无 reasoning 的
-    // function_call 都会触发 400）。Operit 常把 think 与 tool call 拆在不同 turn，
-    // 因此 thinking 先缓存，遇到下一个 function_call 时随其一起输出；
-    // 无后续调用则随真实边界丢弃，避免产生孤立 reasoning item。
+    // reasoning 缓冲：DeepSeek Responses 要求 thinking mode 的 reasoning_text 必须回传
+    // （"must be passed back"）。Operit 常把 think 与 tool call 拆在不同 turn，
+    // 因此 thinking 先缓存，遇到下一个 function_call 时随其一起输出（reasoning 紧跟 function_call）；
+    // 无 function_call 消费的纯 think 随后续真实边界输出为 reasoning item，绝不丢弃
+    // （v1.0.7，对齐官方 DeepseekProvider queuedAssistantReasoning 缓冲语义）。
     var pendingReasoning = "";
     var seq = 0;
 
@@ -458,7 +524,18 @@ function buildResponsesInput(chatHistory) {
         // 相邻但独立的 turn，且顺序可能是 TOOL_CALL 先于 ASSISTANT(think)；
         // 若边界 flush 清空思考，后续 function_call 将缺少前置 reasoning，
         // 反而触发 DeepSeek "reasoning_text must be passed back" 400。
-        // 残留思考若无 function_call 消费，会在下次真实边界 push 时被丢弃。
+    }
+    // v1.0.7: 真实边界输出残留 reasoning（随后续真实边界，绝不丢弃）。
+    // 对齐官方 DeepseekProvider queuedAssistantReasoning 缓冲语义：无 function_call
+    // 消费的纯 think 也要回传，否则触发 "reasoning_text must be passed back" 400。
+    function flushPendingReasoning() {
+        if (pendingReasoning) {
+            input.push({
+                type: "reasoning",
+                content: [{ type: "reasoning_text", text: pendingReasoning }],
+            });
+            pendingReasoning = "";
+        }
     }
 
     for (var i = 0; i < chatHistory.length; i++) {
@@ -467,9 +544,11 @@ function buildResponsesInput(chatHistory) {
         var content = String((t && t.content) || "");
         if (kind === "SYSTEM") {
             flushCancelled();
+            flushPendingReasoning();
             input.push({ type: "message", role: "developer", content: content });
         } else if (kind === "USER" || kind === "SUMMARY") {
             flushCancelled();
+            flushPendingReasoning();
             input.push({ type: "message", role: "user", content: content });
         } else if (kind === "ASSISTANT") {
             var sp = splitThinking(content);
@@ -552,6 +631,15 @@ function buildResponsesInput(chatHistory) {
 
     // end of history: leftover orphan function_calls -> User cancelled (align flushOpenToolCallsAsCancelled)
     flushCancelled();
+    // v1.0.7: 兜底 —— 残留 pendingReasoning（若有）随后续真实边界输出为 reasoning item，绝不丢弃。
+    // 覆盖"TOOL_CALL 先于 ASSISTANT(think)"等跨 turn 顺序导致 think 未被同批 function_call 消费的场景。
+    if (pendingReasoning) {
+        input.push({
+            type: "reasoning",
+            content: [{ type: "reasoning_text", text: pendingReasoning }],
+        });
+        pendingReasoning = "";
+    }
     return input;
 }
 
@@ -698,3 +786,5 @@ exports.listModels = listModels;
 exports.sendMessage = sendMessage;
 exports.testConnection = testConnection;
 exports.calculateInputTokens = calculateInputTokens;
+// v1.0.8: 导出 SSE 转发器（单元测试注入 send 桩；运行时用全局 sendIntermediateResult）
+exports.makeSseForwarder = makeSseForwarder;
