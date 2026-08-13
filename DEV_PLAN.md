@@ -2,6 +2,15 @@
 
 > 记录尚未形成 Bug 的观察项与规划。状态：待验证 / 待处理。版本基线：v1.0.2（打包后）。
 
+## 2026-08-13 v1.0.12 修复 400 链：并行 function_call 之间不再插入 reasoning（v1.0.11 回归修复）
+
+- 状态：代码修复 + 结构测试通过 + **v1.0.12 已打包（2026-08-13 23:30）**；待烧录 + 重启 Operit + 真机回归。
+- 现象：v1.0.11 烧录重启后测"5 轮思考+工具调用"第 1 轮即 HTTP 400 `No tool output found for tool call call_1`。真机 diag：`inputSummary` 并行调用形状为 `reasoning → C:call_1 → reasoning → C:call_2 → O:call_1 → O:call_2`——**每个 function_call 前都插了 reasoning**。
+- 根因：v1.0.11 的 `pushCall()` 无条件输出 reasoning item（含空兜底），导致**同一批并行 function_call 之间也插入了 reasoning**。DeepSeek Responses 官方并行格式是 `reasoning → call_1 → call_2 → output_1 → output_2`（一批调用只一个前置 reasoning）；reasoning 插在 call 之间会打断 call/output 配对 → `No tool output found`。
+- 修复（v1.0.12）：`pushCall()` 增加"前一个 input item 是否为 function_call"判断——`pendingReasoning` 非空（有 think）或前一个 item **不是** function_call（新一批调用）时才输出 reasoning；同一批后续 function_call 直接追加，不再重复插入 reasoning。无 think 且非并行继续时仍输出空 reasoning 兜底（保留 v1.0.11 对 `reasoning_text must be passed back` 的修复）。
+- 验证：`node --check` 通过；npm test 全通过（A-J，含新增场景 J「同一 ASSISTANT 并行两 tool 无 think」：`R C:call_0 C:call_1 O:call_0 O:call_1`，并行 call 之间不插 reasoning；场景 F「并行+思考」同样变为该形状；场景 I 连续独立 tool 轮仍各自有 R 兜底）。打包 `deepseek_responses_provider-v1.0.12.toolpkg`（3 文件，manifest 根目录，12K）。
+- 待办：烧录 v1.0.12 → 重启 Operit → 5 轮思考+工具调用（含并行批次）真机回归；确认无 `reasoning_text must be passed back` 也无 `No tool output found`。
+
 ## 2026-08-13 v1.0.11 修复 400 链：function_call 前必须始终有 reasoning item（空 reasoning 兜底）
 
 - 状态：代码修复 + 结构测试通过 + **v1.0.11 已打包（2026-08-13 23:10）**；待烧录 + 重启 Operit + 真机回归。

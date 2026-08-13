@@ -14,14 +14,20 @@ function buildResponsesInput(chatHistory) {
         pendingReasoning += (pendingReasoning ? "\n" : "") + String(text);
     }
     function pushCall(name, args) {
-        // v1.0.11: 每个 function_call 前必须输出 reasoning item（对齐官方
-        // DeepseekProvider queueToolCalls 的 reasoning_content 可为空语义）。
-        // 当 Operit 把 think 拆到别的 turn 或丢失时，空 reasoning 兜底，
-        // 避免无前置 reasoning 的 function_call 触发 400。
-        input.push({
-            type: "reasoning",
-            content: [{ type: "reasoning_text", text: pendingReasoning || "" }],
-        });
+        // v1.0.12: reasoning 只在"有 think 或新一批调用"时输出一次，之后同一批
+        // 并行 function_call 不再重复插入 reasoning（对齐官方 Responses 并行格式
+        // reasoning -> call_1 -> call_2 -> output_1 -> output_2）。
+        // v1.0.11 无条件每个 call 前都插 reasoning，导致并行时
+        // reasoning 打断 call/output 配对 -> DeepSeek 400 "No tool output found"。
+        // 无 think 且非并行继续时输出空 reasoning 兜底（避免 reasoning_text 400）。
+        var last = input[input.length - 1];
+        var prevWasCall = !!(last && last.type === "function_call");
+        if (pendingReasoning || !prevWasCall) {
+            input.push({
+                type: "reasoning",
+                content: [{ type: "reasoning_text", text: pendingReasoning || "" }],
+            });
+        }
         pendingReasoning = "";
         var cid = "call_" + (seq++);
         openCallIds.push(cid);
@@ -445,3 +451,12 @@ var I = [
   { kind: "TOOL_RESULT", content: "<tool_result name=\"time:get_time\" status=\"success\"><content>{ok:true}</tool_result>" },
 ];
 check(buildResponsesInput(I), "I 连续纯tool无think兜底");
+// 场景 J：同一 ASSISTANT 并行两 tool（无 think）—— 只输出一个前置 reasoning，中间不插（v1.0.12）
+var J = [
+  { kind: "SYSTEM", content: "sys" },
+  { kind: "USER", content: "并行" },
+  { kind: "ASSISTANT", content: "\n<tool name=\"a\"><param name=\"x\">1</param></tool>\n<tool name=\"b\"><param name=\"x\">2</param></tool>" },
+  { kind: "TOOL_RESULT", content: "<tool_result name=\"a\"><content>A</content></tool_result><tool_result name=\"b\"><content>B</content></tool_result>" },
+];
+check(buildResponsesInput(J), "J 并行tool无think不插reasoning");
+
