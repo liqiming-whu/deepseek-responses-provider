@@ -18,7 +18,7 @@ function makeHarness() {
     "data: [DONE]\n\n",
   ].join("");
   fwd(sse);
-  assert.deepStrictEqual(sent.map((x) => x.chunk), ["思考中。", "答案"], "T1 delta 顺序转发");
+  assert.deepStrictEqual(sent.map((x) => x.chunk), ["<think>", "思考中。", "</think>\n", "答案"], "T1 delta 顺序转发 + think 包裹");
   console.log("[T1 SSE delta 转发] OK");
 }
 

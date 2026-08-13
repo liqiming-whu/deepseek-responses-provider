@@ -177,6 +177,7 @@ function makeSseForwarder(sendFn) {
     }
     var buffer = "";
     var MAX_CHUNK = 512; // 单块保护：超长 delta 切分，避免桥接层单块过大
+    var thinkingOpen = false; // v1.0.10: thinking 包裹状态（<think>...</think>）
     function forwardDelta(delta) {
         var text = String(delta);
         if (!text) return;
@@ -200,14 +201,31 @@ function makeSseForwarder(sendFn) {
                 var line = lines[k].trim();
                 if (line.indexOf("data:") !== 0) continue;
                 var payload = line.substring(5).trim();
-                if (!payload || payload === "[DONE]") continue;
+                if (!payload) continue;
+                if (payload === "[DONE]") {
+                    // v1.0.10: 流结束关闭 thinking 包裹
+                    if (thinkingOpen) { send({ chunk: "</think>\n" }); thinkingOpen = false; }
+                    continue;
+                }
                 var evt;
                 try { evt = JSON.parse(payload); } catch (e) { continue; }
                 var type = evt && evt.type;
                 var delta = evt && evt.delta;
-                if (delta && (type === "response.output_text.delta" ||
-                              type === "response.reasoning_text.delta" ||
-                              type === "response.reasoning_summary_text.delta")) {
+                if (delta && (type === "response.output_text.delta")) {
+                    if (thinkingOpen) {
+                        send({ chunk: "</think>\n" });
+                        thinkingOpen = false;
+                    }
+                    forwardDelta(delta);
+                } else if (delta && (type === "response.reasoning_text.delta" ||
+                                    type === "response.reasoning_summary_text.delta")) {
+                    // v1.0.10: thinking 必须带 <think> 包裹流式上报，
+                    // 否则 Operit 历史 content 无标记 -> 下轮 splitThinking
+                    // 提取不到 -> reasoning 未回传 -> DeepSeek 400。
+                    if (!thinkingOpen) {
+                        send({ chunk: "<think>" });
+                        thinkingOpen = true;
+                    }
                     forwardDelta(delta);
                 }
             }
