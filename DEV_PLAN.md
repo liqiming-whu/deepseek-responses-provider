@@ -40,6 +40,18 @@
 - 验证：`node --check`、npm test 全通过；归档仅 3 文件（v1.0.5，29901B）；2026-08-13 17:57 烧录成功（`enabled=true`、`related_load_errors={}`）。Git commit `7fb1518` + tag `v1.0.5` 已推送。
 - 待办：重启 Operit → 启用插件 → 超长会话（>100 万字符）多轮工具调用回归；重点确认不再出现"工具调用前中断"。
 
+## 2026-08-13 v1.0.5 流式通道实测仍中断 → 修正根因为"流式 toolCall 挂起"（v1.0.5 → v1.0.6）
+
+- 状态：**v1.0.6 已烧录（2026-08-13 18:12）**；待真机验证。
+- 现象：v1.0.5（流式 toolCall + read_timeout=1000s）烧录后，超长会话压力测试第 1 轮成功，第 2 轮仍中断；**且中断无错误文本**（对比 v1.0.4 及以前中断带 `Provider error: timeout` 文本）。
+- 证据（源码排查）：
+  - Operit JS 引擎超时 `JsTimeoutConfig.MAIN_TIMEOUT_SECONDS=1800`（30 分钟）——插件侧无整体超时瓶颈；
+  - `ToolPkgJsAiProviderService.sendMessage` 用 `stream{}` 包装，`invokeProviderFunction` 传 `runtimeKind="provider"` + `dispatchIntermediateOnMain=false`；
+  - v1.0.5 的 `toolCall("http_request", params, {onIntermediateResult})` 走 `callToolAsyncStreaming` → `invokeAndStream`，在 provider 沙箱（dispatchIntermediateOnMain=false）下 **Promise 可能永不 resolve（静默挂起）**；Operit 前端等待后静默中断，无错误文本返回。
+- 修复（v1.0.6）：`httpStreamRequest()` 增加**硬超时兜底**——超过 `read_timeout + 60s` 未完成则强制 reject，错误文本带 `elapsedMs` 与 `channel`（stream/fallback）诊断；`diag.channel` 记录实际走的通道，`diag.elapsedMs` 在成功/HTTP 错误/异常/硬超时四条路径均记录。中断时必然返回可定位文本，不再静默断流。
+- 验证：`node --check`、npm test 全通过；归档仅 3 文件（v1.0.6，28689B）；2026-08-13 18:12 烧录成功。Git commit `60b8066` + tag `v1.0.6` 已推送。
+- 待办：重启 Operit → 启用插件 → 超长会话压力测试；若再中断，靠 `diag.channel` + `diag.elapsedMs` 判断是 stream 挂起（→ 改回一次性 Tools.Net.http + 大 timeout）还是 fallback 超时（→ 继续加大 timeout）还是前端问题。
+
 ## 2026-08-13 并行回归观察（v0.6.2 → v1.0.0 基线）
 
 干净会话多轮 4 工具并行回归总体可靠：文件读写、网络、搜索、记忆类工具均可正常发起并返回，无 Provider 丢调用、无 call_id 失配。以下两个注意点单独记录。
