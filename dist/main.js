@@ -220,6 +220,7 @@ async function sendMessage(event) {
     var reasoningText = "";
     var functionCalls = {};
     var functionCallOrder = [];
+    var reqStart = Date.now();
 
     try {
         var resp = await Tools.Net.http({
@@ -228,12 +229,16 @@ async function sendMessage(event) {
             headers: buildHeaders(apiKey),
             body: requestBody,
             connect_timeout: 30,
-            read_timeout: 120,
+            // 2026-08-13 v1.0.4: 长会话 + thinking 模式首 token 延迟可超过 120s
+            // （实测 bodyLength≈100 万字符时 DeepSeek 思考阶段超时，表现为"工具调用前中断"）
+            read_timeout: 600,
             validateStatus: false,
         });
+        diag.elapsedMs = Date.now() - reqStart;
         var status = Number(resp && resp.statusCode);
         var raw = String((resp && resp.content) || "");
         if (status < 200 || status >= 300) {
+            diag.elapsedMs = Date.now() - reqStart;
             return {
                 text: "HTTP " + status + ": " + raw + "\n[diag] " + JSON.stringify(diag),
                 usage: undefined,
@@ -253,7 +258,8 @@ async function sendMessage(event) {
             } catch (e) { /* 忽略解析失败 */ }
         }
     } catch (e) {
-        return { text: "Provider error: " + String((e && e.message) || e), actualUrl: endpoint };
+        diag.elapsedMs = Date.now() - reqStart;
+        return { text: "Provider error: " + String((e && e.message) || e) + "\n[diag] " + JSON.stringify(diag), actualUrl: endpoint };
     }
 
     function ensureFunctionCall(evt, item) {
