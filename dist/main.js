@@ -160,7 +160,55 @@ async function calculateInputTokens(event) {
 }
 
 // ---------------------------------------------------------------------------
-// sendMessage：核心（异步，Tools.Net.http + SSE 解析）
+// httpStreamRequest：流式 HTTP 通道（v1.0.5）
+// 官方 DeepseekProvider 用 OkHttp readTimeout=1000s + charStream 逐行流式读取，
+// readTimeout 语义是"行间空闲"，SSE 持续推流就不会误杀长思考。
+// 插件侧等价实现：toolCall("http_request", params, {onIntermediateResult}) ->
+// callToolAsyncStreaming -> http_request.invokeAndStream -> 逐 chunk 返回。
+// 最终 resolve 仍是完整响应对象（{statusCode, content, ...}），超时/异常会 reject。
+// 若环境不支持流式 toolCall（无 onIntermediateResult 通道），回退 Tools.Net.http。
+// ---------------------------------------------------------------------------
+function httpStreamRequest(opts) {
+    return new Promise(function (resolve, reject) {
+        var done = false;
+        function settle(fn, val) {
+            if (done) return;
+            done = true;
+            try { fn(val); } catch (e) { /* ignore */ }
+        }
+        try {
+            if (typeof toolCall === "function") {
+                var params = {
+                    url: opts.url,
+                    method: opts.method,
+                    headers: opts.headers,
+                    body: opts.body,
+                    connect_timeout: opts.connect_timeout,
+                    read_timeout: opts.read_timeout,
+                    validateStatus: opts.validateStatus !== false,
+                };
+                toolCall("http_request", params, {
+                    onIntermediateResult: function (evt) {
+                        // 流式 chunk 到达即连接活跃，无需累积（最终结果仍完整返回）
+                        void evt;
+                    },
+                }).then(function (finalResp) {
+                    settle(resolve, finalResp);
+                }).catch(function (err) {
+                    settle(reject, err);
+                });
+            } else {
+                Tools.Net.http(opts).then(function (r) { settle(resolve, r); })
+                    .catch(function (e) { settle(reject, e); });
+            }
+        } catch (e) {
+            settle(reject, e);
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
+// sendMessage：核心（异步，流式 HTTP + SSE 解析）
 // ---------------------------------------------------------------------------
 async function sendMessage(event) {
     var p = payloadOf(event);
@@ -223,15 +271,17 @@ async function sendMessage(event) {
     var reqStart = Date.now();
 
     try {
-        var resp = await Tools.Net.http({
+        var resp = await httpStreamRequest({
             url: endpoint,
             method: "POST",
             headers: buildHeaders(apiKey),
             body: requestBody,
             connect_timeout: 30,
-            // 2026-08-13 v1.0.4: 长会话 + thinking 模式首 token 延迟可超过 120s
-            // （实测 bodyLength≈100 万字符时 DeepSeek 思考阶段超时，表现为"工具调用前中断"）
-            read_timeout: 600,
+            // 2026-08-13 v1.0.5: 对齐官方 AIServiceFactory readTimeout=1000s。
+            // 流式通道（callToolAsyncStreaming -> http_request.invokeAndStream）下
+            // readTimeout 是"chunk 间空闲"而非"整请求空闲"：DeepSeek thinking 模式
+            // 持续推 reasoning delta，连接保持活跃，长会话不再被读超时误杀。
+            read_timeout: 1000,
             validateStatus: false,
         });
         diag.elapsedMs = Date.now() - reqStart;
