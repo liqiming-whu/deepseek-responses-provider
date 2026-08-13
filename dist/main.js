@@ -312,16 +312,26 @@ async function sendMessage(event) {
 function buildResponsesInput(chatHistory) {
     var input = [];
     var openCallIds = []; // FIFO queue: pending function_call call_ids (align DeepseekProvider.openToolCallIds)
+    // reasoning 缓冲：DeepSeek Responses 要求 reasoning item 必须紧跟 function_call
+    // （"thinking mode 的 reasoning_text 必须回传"，孤立 reasoning 或无 reasoning 的
+    // function_call 都会触发 400）。Operit 常把 think 与 tool call 拆在不同 turn，
+    // 因此 thinking 先缓存，遇到下一个 function_call 时随其一起输出；
+    // 无后续调用则随真实边界丢弃，避免产生孤立 reasoning item。
+    var pendingReasoning = "";
     var seq = 0;
 
     function pushReasoning(text) {
         if (!text) return;
-        input.push({
-            type: "reasoning",
-            content: [{ type: "reasoning_text", text: String(text) }],
-        });
+        pendingReasoning += (pendingReasoning ? "\n" : "") + String(text);
     }
     function pushCall(name, args) {
+        if (pendingReasoning) {
+            input.push({
+                type: "reasoning",
+                content: [{ type: "reasoning_text", text: pendingReasoning }],
+            });
+            pendingReasoning = "";
+        }
         var cid = "call_" + (seq++);
         openCallIds.push(cid);
         input.push({
@@ -352,6 +362,11 @@ function buildResponsesInput(chatHistory) {
                 output: "User cancelled",
             });
         }
+        // 注意：不在此清空 pendingReasoning。Operit 常把"think"与"tool call"拆成
+        // 相邻但独立的 turn，且顺序可能是 TOOL_CALL 先于 ASSISTANT(think)；
+        // 若边界 flush 清空思考，后续 function_call 将缺少前置 reasoning，
+        // 反而触发 DeepSeek "reasoning_text must be passed back" 400。
+        // 残留思考若无 function_call 消费，会在下次真实边界 push 时被丢弃。
     }
 
     for (var i = 0; i < chatHistory.length; i++) {
@@ -394,11 +409,15 @@ function buildResponsesInput(chatHistory) {
                 }
             }
         } else if (kind === "TOOL_CALL") {
-            var m = extractToolCalls(content);
+            var tcsp = splitThinking(content);
+            var m = extractToolCalls(tcsp.plain);
             if (m.length > 0) {
                 // Operit 会把同一批并行调用拆成连续多个 TOOL_CALL turn，随后用一个
                 // TOOL_RESULT turn 聚合全部结果。这里必须保留已有 pending calls，
                 // 不能在每个 TOOL_CALL 前 flush，否则最终只剩最后一个调用可配对。
+                if (tcsp.thinking) {
+                    pushReasoning(tcsp.thinking);
+                }
                 for (var k2 = 0; k2 < m.length; k2++) {
                     pushCall(m[k2].name, m[k2].arguments);
                 }

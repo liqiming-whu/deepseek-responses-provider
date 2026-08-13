@@ -1,6 +1,23 @@
 # DeepSeek Responses Provider — 开发计划
 
-> 记录尚未形成 Bug 的观察项与规划。状态：待验证 / 待处理。版本基线：v1.0.0（打包后）。
+> 记录尚未形成 Bug 的观察项与规划。状态：待验证 / 待处理。版本基线：v1.0.2（打包后）。
+
+## 2026-08-13 偶发 HTTP 400：`reasoning_text in the thinking mode must be passed back`（v1.0.2 → v1.0.3 修复）
+
+- 状态：代码修复 + 结构测试通过 + **v1.0.3 已烧录（2026-08-13 17:17）**；**待 Operit 重启 + 真机长会话回归**（>10 轮连续工具调用）。
+- 现象：DeepSeek `/v1/responses` 偶发返回 400：
+  ```
+  The `reasoning_text` in the thinking mode must be passed back to the API.
+  ```
+  触发集中在**长会话多轮连续工具调用**后（本次触发时已 100+ turn，histKinds 为大量 TOOL_CALL/TOOL_RESULT/ASSISTANT 交替），非短会话首轮。
+- 证据（真机 diag，2026-08-13）：`histKinds` 末尾形状 `ASSISTANT(纯 think) → TOOL_RESULT → ASSISTANT(文字+tool) → TOOL_RESULT`；Operit 常把"模型思考"和"工具调用"拆成**相邻但独立的 turn**，顺序可能是 `TOOL_CALL → ASSISTANT(think) → TOOL_RESULT`（think 出现在调用之后、结果之前）。
+- 根因：`buildResponsesInput()` 对 thinking 的"即时 push"模型。DeepSeek Responses 要求 **reasoning item 必须紧跟一个 function_call item**（thinking 模式回传约束）。当 think 与 tool call 被拆在不同 turn 时：
+  - 旧代码在 ASSISTANT 纯 think 分支立即 `pushReasoning()` → 产出孤立 reasoning（后面不是 function_call，可能是 message 或 function_call_output）；
+  - 或 TOOL_CALL 分支只有 tool 时没带前置 thinking → function_call 缺少应回传的 reasoning_text。
+  - 两种都会触发上述 400。
+- 修复（v1.0.3）：`buildResponsesInput()` 引入 `pendingReasoning` 缓冲——think 先缓存，遇到下一个 `pushCall()` 时随 function_call 一起输出；`flushCancelled()` 不清空缓冲（避免边界把尚未配对的思考丢弃），残留思考若无 function_call 消费则不输出（不产生孤立 reasoning）。
+- 自动验证：复用 main.js 提取的 `buildResponsesInput` 独立跑结构测试，覆盖 A 思考+工具同 turn、B 思考/工具分 turn、C 真实尾形状、D 长链多轮、E TOOL_CALL 含 think+tool、F 并行、G 20 轮真实形状——全部 `reasoning 紧跟 function_call`，无孤立 reasoning、无 C 紧跟 O 错序；`node --check` 通过。
+- 待办：打包 v1.0.3 → 烧录 → Operit 重启 → 长会话真机回归（重点：长链工具调用 10+ 轮后不再 400）。
 
 ## 2026-08-13 并行回归观察（v0.6.2 → v1.0.0 基线）
 
