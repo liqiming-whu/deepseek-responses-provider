@@ -1,5 +1,8 @@
 # DeepSeek Responses Provider for Operit
 
+> **重要说明**：DeepSeek Responses API 主要是为了兼容 Codex/Responses 生态而增加的协议入口；它没有提供一套比原生 Chat API 更强的底层推理模型。对于已经正确支持 DeepSeek reasoning_content、流式输出和 tool calls 的客户端，用原生 Chat Completions 就足够。
+> 感谢 <https://github.com/luojiaping> 指出。**本项目以后不再维护。**
+
 通过 Operit 官方 `registerAiProvider` 机制，将 DeepSeek 接入 `/v1/responses` 的自定义 AI Provider。
 
 ## 功能
@@ -12,9 +15,9 @@
 
 ## 版本
 
-当前稳定版：`v1.0.2`。
+当前稳定版：`v1.0.12`。
 
-已在 Operit Android 真机验证：普通对话、reasoning、多轮串行工具调用，以及连续四轮 4 工具并行调用（每轮 4/4、无伪回显、无 `User cancelled`、无结果缺失）。
+最终版本 `v1.0.12` 修复了 thinking 模式下 reasoning 回传的两类 HTTP 400（`reasoning_text must be passed back` 与并行 `function_call` 之间插入 reasoning 导致的 `No tool output found`）。已在 Operit Android 真机验证：普通对话、reasoning、多轮串行工具调用，以及并行工具调用。
 
 ## 安装
 
