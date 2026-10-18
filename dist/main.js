@@ -168,70 +168,180 @@ async function calculateInputTokens(event) {
 // fullText（<think>... 几万字符）作为单个 chunk 交给前端渲染管道，触发静默中断
 // （无 error、无 diag，官方 provider 同样场景逐 delta 小块上报则完全正常）。
 // 本函数把流式接收的原始 chunk 实时解析为 SSE delta 并转发，块粒度对齐官方。
-// 兼容：无全局 sendIntermediateResult（旧版 Operit）时返回空操作，维持旧行为。
+// 无 sendIntermediateResult 的旧环境只累积最终返回，不进行中间结果上报。
 // ---------------------------------------------------------------------------
+// One accumulator owns received text and tool snapshots. UI emission is a projection
+// of that state; text.done/item.done/completed must not disappear from saved history.
+function createResponsesAccumulator(onText) {
+    var parts = Object.create(null), partOrder = [], itemKeys = Object.create(null),
+        outputKeys = Object.create(null), identities = Object.create(null), calls = Object.create(null), callOrder = [];
+    function itemKey(evt, item) {
+        var id = (item && item.id) || evt.item_id || "";
+        var outputKey = evt.output_index === undefined ? "" : "output_" + evt.output_index;
+        var key = (outputKey && outputKeys[outputKey]) || (id && itemKeys[id]) || outputKey || (id ? "item_" + id : "default");
+        var identity = identities[key] || (identities[key] = {});
+        if (id) { itemKeys[id] = key; identity.id = id; }
+        if (outputKey) { outputKeys[outputKey] = key; identity.output_index = evt.output_index; }
+        return key;
+    }
+    function part(kind, key, index) {
+        var pk = kind + ":" + key + ":" + index;
+        if (!parts[pk]) {
+            parts[pk] = {kind: kind, itemKey: key, index: index, text: ""};
+            partOrder.push(pk);
+        }
+        return parts[pk];
+    }
+    function update(kind, key, index, text, snapshot) {
+        if (typeof text !== "string" || !text) return;
+        var p = part(kind, key, index), suffix = text;
+        if (snapshot) {
+            if (text === p.text) return;
+            // A completed snapshot replaces the accumulated representation, not an
+            // additional delta. A conflicting rewrite cannot safely patch emitted UI.
+            if (text.indexOf(p.text) !== 0) throw new Error("Conflicting Responses text snapshot for " + kind + ":" + key + ":" + index);
+            suffix = text.slice(p.text.length);
+            p.text = text;
+        } else p.text += text;
+        if (suffix && onText) onText(kind, suffix);
+    }
+    function call(evt, item) {
+        var key = itemKey(evt, item), c = calls[key];
+        if (!c) { c = calls[key] = {name: "", arguments: "", snapshotArguments: ""}; callOrder.push(key); }
+        if (item.name) c.name = String(item.name);
+        if (item.arguments !== undefined && item.arguments !== null) c.snapshotArguments = extractArgsText(item.arguments);
+        return c;
+    }
+    function completedItem(evt, item) {
+        var key = itemKey(evt, item), content = item.content || [];
+        if (item.type === "function_call") { call(evt, item); return; }
+        for (var i = 0; i < content.length; i++) {
+            var p = content[i];
+            if (!p) continue;
+            if (p.type === "reasoning_text" || p.type === "reasoning_content") update("reasoning", key, i, p.text, true);
+            else if (p.type === "output_text" || p.type === "text") update("text", key, i, p.text, true);
+        }
+    }
+    function handle(evt) {
+        var type = evt.type || "", key = itemKey(evt, evt.item);
+        var index = evt.content_index === undefined ? 0 : evt.content_index;
+        if (type === "response.reasoning_text.delta") update("reasoning", key, index, evt.delta, false);
+        else if (type === "response.reasoning_text.done") update("reasoning", key, index, evt.text, true);
+        else if (type === "response.reasoning_summary_text.delta" || type === "response.reasoning_summary_text.done") {
+            // Keep summary indexes separate from raw reasoning content indexes.
+            update("summary", key, evt.summary_index === undefined ? 0 : evt.summary_index,
+                type.endsWith(".delta") ? evt.delta : evt.text, type.endsWith(".done"));
+        } else if (type === "response.output_text.delta") update("text", key, index, evt.delta, false);
+        else if (type === "response.output_text.done") update("text", key, index, evt.text, true);
+        else if (type === "response.output_item.added") {
+            if (evt.item && evt.item.type === "function_call") call(evt, evt.item);
+        } else if (type === "response.output_item.done") completedItem(evt, evt.item || {});
+        else if (type === "response.function_call_arguments.delta") call(evt, {name: evt.name}).arguments += String(evt.delta || "");
+        else if (type === "response.function_call_arguments.done") call(evt, {name: evt.name, arguments: evt.arguments});
+        else if (type === "response.completed" || type === "response.incomplete") {
+            var output = (evt.response && evt.response.output) || [];
+            for (var j = 0; j < output.length; j++) completedItem({output_index: j}, output[j]);
+        } else if (type === "response.failed" || type === "response.error") {
+            var error = evt.error || (evt.response && evt.response.error) || {};
+            throw new Error(error.message || "Responses stream failed");
+        }
+    }
+    function result() {
+        var text = "", reasoning = "";
+        partOrder.forEach(function (pk) {
+            var p = parts[pk];
+            if (p.kind === "text") text += p.text;
+            else reasoning += p.text;
+        });
+        return {text: text, reasoningText: reasoning, functionCalls: callOrder.map(function (key) { return calls[key]; })};
+    }
+    function merge(other) {
+        other.visit(function (p) {
+            var identity = other.identity(p.itemKey);
+            update(p.kind, itemKey(identity, identity), p.index, p.text, true);
+        });
+        other.visitCalls(function (otherKey, c) {
+            var identity = other.identity(otherKey), key = itemKey(identity, identity);
+            if (!calls[key]) { calls[key] = c; callOrder.push(key); }
+            else {
+                if (c.name) calls[key].name = c.name;
+                if (c.snapshotArguments || c.arguments) calls[key].snapshotArguments = c.snapshotArguments || c.arguments;
+            }
+        });
+    }
+    return {handle: handle, result: result, merge: merge,
+        identity: function (key) { return identities[key] || {}; },
+        visit: function (fn) { partOrder.forEach(function (key) { fn(parts[key]); }); },
+        visitCalls: function (fn) { callOrder.forEach(function (key) { fn(key, calls[key]); }); }};
+}
+
+// Incremental SSE framing, including split CRLF delimiters and EOF without a
+// blank line. JSON parse failures are isolated from accumulator/protocol errors.
+function makeSseParser(onEvent, onDone) {
+    var buffer = "";
+    function block(text) {
+        var data = text.split(/\r?\n/).filter(function (line) { return line.indexOf("data:") === 0; })
+            .map(function (line) { return line.slice(5).replace(/^ /, ""); }).join("\n").trim();
+        if (!data) return;
+        if (data === "[DONE]") { if (onDone) onDone(); return; }
+        var event;
+        try { event = JSON.parse(data); } catch (e) { return; }
+        onEvent(event);
+    }
+    function feed(chunk) {
+        buffer += String(chunk || "");
+        var match;
+        while ((match = /\r?\n\r?\n/.exec(buffer))) {
+            block(buffer.slice(0, match.index));
+            buffer = buffer.slice(match.index + match[0].length);
+        }
+    }
+    feed.finish = function () { if (buffer.trim()) block(buffer); buffer = ""; };
+    return feed;
+}
+
 function makeSseForwarder(sendFn) {
     var send = sendFn || (typeof sendIntermediateResult === "function" ? sendIntermediateResult : null);
-    if (!send) {
-        return function () { /* 环境不支持流式转发，维持一次性 return */ };
+    var thinkingOpen = false, failure = null;
+    function forward(text) {
+        if (!send) return;
+        for (var i = 0; i < text.length; i += 512) send({chunk: text.slice(i, i + 512)});
     }
-    var buffer = "";
-    var MAX_CHUNK = 512; // 单块保护：超长 delta 切分，避免桥接层单块过大
-    var thinkingOpen = false; // v1.0.10: thinking 包裹状态（<think>...</think>）
-    function forwardDelta(delta) {
-        var text = String(delta);
-        if (!text) return;
-        if (text.length <= MAX_CHUNK) {
-            send({ chunk: text });
-            return;
-        }
-        for (var i = 0; i < text.length; i += MAX_CHUNK) {
-            send({ chunk: text.slice(i, i + MAX_CHUNK) });
-        }
+    function closeThinking() {
+        if (thinkingOpen) { forward("</think>\n"); thinkingOpen = false; }
     }
-    function onRawChunk(chunkText) {
-        if (!chunkText) return;
-        buffer += chunkText;
-        var sep;
-        while ((sep = buffer.indexOf("\n\n")) >= 0) {
-            var block = buffer.slice(0, sep);
-            buffer = buffer.slice(sep + 2);
-            var lines = block.split(/\r?\n/);
-            for (var k = 0; k < lines.length; k++) {
-                var line = lines[k].trim();
-                if (line.indexOf("data:") !== 0) continue;
-                var payload = line.substring(5).trim();
-                if (!payload) continue;
-                if (payload === "[DONE]") {
-                    // v1.0.10: 流结束关闭 thinking 包裹
-                    if (thinkingOpen) { send({ chunk: "</think>\n" }); thinkingOpen = false; }
-                    continue;
-                }
-                var evt;
-                try { evt = JSON.parse(payload); } catch (e) { continue; }
-                var type = evt && evt.type;
-                var delta = evt && evt.delta;
-                if (delta && (type === "response.output_text.delta")) {
-                    if (thinkingOpen) {
-                        send({ chunk: "</think>\n" });
-                        thinkingOpen = false;
-                    }
-                    forwardDelta(delta);
-                } else if (delta && (type === "response.reasoning_text.delta" ||
-                                    type === "response.reasoning_summary_text.delta")) {
-                    // v1.0.10: thinking 必须带 <think> 包裹流式上报，
-                    // 否则 Operit 历史 content 无标记 -> 下轮 splitThinking
-                    // 提取不到 -> reasoning 未回传 -> DeepSeek 400。
-                    if (!thinkingOpen) {
-                        send({ chunk: "<think>" });
-                        thinkingOpen = true;
-                    }
-                    forwardDelta(delta);
-                }
+    var state = createResponsesAccumulator(function (kind, text) {
+        if (kind === "text") closeThinking();
+        else if (!thinkingOpen) { forward("<think>"); thinkingOpen = true; }
+        forward(text);
+    });
+    var parser = makeSseParser(function (evt) {
+        state.handle(evt);
+        if (evt.type === "response.completed" || evt.type === "response.incomplete" ||
+            ((evt.type === "response.output_item.added" || evt.type === "response.output_item.done") && evt.item && evt.item.type === "function_call")) closeThinking();
+    }, closeThinking);
+    function feed(chunk) {
+        if (failure) return;
+        try { parser(chunk); } catch (e) { failure = e; }
+    }
+    feed.finish = function (raw) {
+        try {
+            if (failure) throw failure;
+            parser.finish();
+            // HTTP's final body may repeat the entire already-forwarded stream.
+            // Reconcile snapshots rather than append its deltas twice.
+            if (raw) {
+                var finalState = createResponsesAccumulator();
+                var finalParser = makeSseParser(finalState.handle);
+                finalParser(raw); finalParser.finish();
+                state.merge(finalState);
             }
+            return state.result();
+        } finally {
+            closeThinking();
         }
-    }
-    return onRawChunk;
+    };
+    return feed;
 }
 
 // ---------------------------------------------------------------------------
@@ -333,7 +443,6 @@ async function sendMessage(event) {
         hasConfig: !!(p && p.config),
         hasApiKeyField: cfg.hasOwnProperty("apiKey"),
         apiKeyLen: apiKey ? apiKey.length : 0,
-        apiKeyHead: apiKey ? apiKey.slice(0, 6) + "..." : "(empty)",
         endpoint: rawEndpoint,
         model: model,
         histKinds: hist.map(function (t) { return String((t && t.kind) || "").toUpperCase(); }),
@@ -376,8 +485,7 @@ async function sendMessage(event) {
 
     var fullText = "";
     var reasoningText = "";
-    var functionCalls = {};
-    var functionCallOrder = [];
+    var functionCalls = [];
     var reqStart = Date.now();
     var reqChannel = "";
     // v1.0.8: SSE 流式转发——流式接收的 delta 实时经 sendIntermediateResult 上报，
@@ -414,78 +522,38 @@ async function sendMessage(event) {
                 actualUrl: endpoint,
             };
         }
-        // SSE 逐行解析（Tools.Net.http 可能一次返回完整流，按行拆）
-        var lines = raw.split("\n");
-        for (var i = 0; i < lines.length; i++) {
-            var line = lines[i].trim();
-            if (line.indexOf("data:") !== 0) continue;
-            var payload = line.substring(5).trim();
-            if (payload === "[DONE]") continue;
-            try {
-                var evt = JSON.parse(payload);
-                handleSseEvent(evt);
-            } catch (e) { /* 忽略解析失败 */ }
-        }
+        var parsed = forwardSseRaw.finish(raw);
+        fullText = parsed.text;
+        reasoningText = parsed.reasoningText;
+        functionCalls = parsed.functionCalls;
     } catch (e) {
         diag.elapsedMs = (e && e._elapsedMs) ? e._elapsedMs : (Date.now() - reqStart);
         diag.channel = reqChannel || "unknown";
-        return { text: "Provider error: " + String((e && e.message) || e) + "\n[diag] " + JSON.stringify(diag), actualUrl: endpoint };
-    }
-
-    function ensureFunctionCall(evt, item) {
-        var key = String(evt.output_index !== undefined ? evt.output_index : (item.call_id || item.id || functionCallOrder.length));
-        if (!functionCalls[key]) {
-            functionCalls[key] = { name: "", arguments: "", snapshotArguments: "" };
-            functionCallOrder.push(key);
-        }
-        var call = functionCalls[key];
-        if (item.name) call.name = String(item.name);
-        if (item.arguments !== undefined && item.arguments !== null) {
-            call.snapshotArguments = extractArgsText(item.arguments);
-        }
-        return call;
-    }
-
-    function handleSseEvent(evt) {
-        var type = evt.type || "";
-        var delta = evt.delta;
-        if (type === "response.output_text.delta" && delta) {
-            fullText += delta;
-        } else if (type === "response.reasoning_text.delta" && delta) {
-            reasoningText += delta;
-        } else if (type === "response.reasoning_summary_text.delta" && delta) {
-            reasoningText += delta;
-        } else if (type === "response.output_item.added" || type === "response.output_item.done") {
-            var item = evt.item || {};
-            if (item.type === "function_call") ensureFunctionCall(evt, item);
-        } else if (type === "response.function_call_arguments.delta") {
-            ensureFunctionCall(evt, { name: evt.name || "" }).arguments += String(delta || "");
-        } else if (type === "response.function_call_arguments.done") {
-            var doneCall = ensureFunctionCall(evt, { name: evt.name || "" });
-            if (!doneCall.arguments && evt.arguments !== undefined) {
-                doneCall.snapshotArguments = extractArgsText(evt.arguments);
-            }
-        }
+        var errorText = "Provider error: " + String((e && e.message) || e);
+        // After any intermediate text, Operit ignores the final return. Make a
+        // stream/protocol failure visible there as well, without emitting tools.
+        if (typeof sendIntermediateResult === "function") sendIntermediateResult({chunk: "\n" + errorText});
+        return { text: errorText + "\n[diag] " + JSON.stringify(diag), actualUrl: endpoint };
     }
 
     if (reasoningText) {
         fullText = "<think>" + reasoningText + "</think>\n" + fullText;
     }
-    for (var f = 0; f < functionCallOrder.length; f++) {
-        var fc = functionCalls[functionCallOrder[f]];
-        var argsText = fc.arguments || fc.snapshotArguments || "{}";
+    for (var f = 0; f < functionCalls.length; f++) {
+        var fc = functionCalls[f];
+        var argsText = fc.snapshotArguments || fc.arguments || "{}";
         fullText += renderToolCall(fc.name, argsText);
     }
-    diag.functionCallCount = functionCallOrder.length;
+    diag.functionCallCount = functionCalls.length;
     diag.reasoningLength = reasoningText.length;
     // v1.0.9: 工具调用 XML 流式上报——Kotlin hasIntermediateTextChunk=true 时
     // 最终 return 文本被忽略，而 Operit 从 Provider 文本流解析 <tool> 标记识别
     // 工具调用；此处把渲染后的 <tool> XML 也经 sendIntermediateResult 上报，
     // 避免工具指令只存在于被忽略的 return 文本里导致静默中断。
-    if (typeof sendIntermediateResult === "function" && functionCallOrder.length > 0) {
-        for (var fx = 0; fx < functionCallOrder.length; fx++) {
-            var fcx = functionCalls[functionCallOrder[fx]];
-            var argsx = fcx.arguments || fcx.snapshotArguments || "{}";
+    if (typeof sendIntermediateResult === "function" && functionCalls.length > 0) {
+        for (var fx = 0; fx < functionCalls.length; fx++) {
+            var fcx = functionCalls[fx];
+            var argsx = fcx.snapshotArguments || fcx.arguments || "{}";
             sendIntermediateResult({ chunk: renderToolCall(fcx.name, argsx) });
         }
     }

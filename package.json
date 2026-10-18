@@ -1,11 +1,11 @@
 {
   "name": "deepseek-responses-provider",
-  "version": "1.0.12",
+  "version": "1.0.13",
   "private": true,
   "description": "DeepSeek via Responses API custom AI provider for Operit",
   "scripts": {
     "check": "node --check dist/main.js",
-    "test": "node tests/test_pair.js && node tests/test_echo_pair.js && node tests/test_assistant_echo_pair.js && node tests/test_reasoning_pair.js",
+    "test": "node tests/test_pair.js && node tests/test_echo_pair.js && node tests/test_assistant_echo_pair.js && node tests/test_reasoning_pair.js && node tests/test_sse_forwarder.js && node tests/test_responses_lifecycle.js",
     "build": "bash scripts/build.sh"
   }
 }

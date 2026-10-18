@@ -1,19 +1,6 @@
-// 回归：伪 TOOL_RESULT 回显不能消费并行 call FIFO。
-const fs = require('fs');
-const src = fs.readFileSync('/root/deepseek-responses-provider/dist/main.js', 'utf8');
-function extractFn(name) {
-  const start = src.indexOf('function ' + name);
-  const end = src.indexOf('\nfunction ', start + 10);
-  return src.slice(start, end > 0 ? end : src.length);
-}
-const parts = [
-  extractFn('splitThinking'), extractFn('xmlUnescape'), extractFn('extractToolCalls'),
-  extractFn('normalizeToolResultText'), extractFn('extractToolResults'),
-  extractFn('extractToolResultsList'), extractFn('buildResponsesInput'),
-  'module.exports = { buildResponsesInput };'
-];
-fs.writeFileSync('/tmp/echo_pair_module.js', parts.join('\n'));
-const m = require('/tmp/echo_pair_module.js');
+"use strict";
+// Load current production functions in an isolated Operit sandbox.
+const m = require("./load_provider")();
 const lt = '<';
 function call(tag, name, path) {
   return lt + 'tool_' + tag + ' name="' + name + '">' + lt + 'param name="path">' + path + lt + '/param>' + lt + '/tool_' + tag + '>';
