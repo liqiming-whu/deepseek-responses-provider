@@ -1,9 +1,7 @@
-// 真实回归：ASSISTANT 同 turn 含说明文字 + 4 个调用 XML，不能把整段纯文本回退成 output。
-const fs = require('fs');
-const src = fs.readFileSync('/root/deepseek-responses-provider/dist/main.js','utf8');
-function fn(n){const s=src.indexOf('function '+n),e=src.indexOf('\nfunction ',s+10);return src.slice(s,e>0?e:src.length);}
-fs.writeFileSync('/tmp/assistant_echo_module.js',[fn('splitThinking'),fn('xmlUnescape'),fn('extractToolCalls'),fn('normalizeToolResultText'),fn('extractToolResults'),fn('extractToolResultsList'),fn('buildResponsesInput'),'module.exports={buildResponsesInput};'].join('\n'));
-const m=require('/tmp/assistant_echo_module.js'),L='<';
+"use strict";
+// Load current production functions in an isolated Operit sandbox.
+const m = require("./load_provider")();
+const L='<';
 function c(t,n){return L+'tool_'+t+' name="'+n+'">'+L+'param name="x">'+t+L+'/param>'+L+'/tool_'+t+'>';}
 function r(t,n,v){return L+'tool_result_'+t+' name="'+n+'" status="success">'+L+'content>'+v+L+'/content>'+L+'/tool_result_'+t+'>';}
 const assistant='开始并行测试\n'+c('a','list_files')+c('b','time:get_time')+c('c','daily_life:get_current_date')+c('d','query_memory');

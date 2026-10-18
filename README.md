@@ -1,7 +1,7 @@
 # DeepSeek Responses Provider for Operit
 
 > **重要说明**：DeepSeek Responses API 主要是为了兼容 Codex/Responses 生态而增加的协议入口；它没有提供一套比原生 Chat API 更强的底层推理模型。对于已经正确支持 DeepSeek reasoning_content、流式输出和 tool calls 的客户端，用原生 Chat Completions 就足够。
-> 感谢 <https://github.com/luojiaping> 指出。**本项目以后不再维护。**
+> 感谢 <https://github.com/luojiaping> 指出。项目现已恢复维护，继续改进 Operit 自定义 Responses Provider 的协议兼容与回归测试。
 
 通过 Operit 官方 `registerAiProvider` 机制，将 DeepSeek 接入 `/v1/responses` 的自定义 AI Provider。
 
@@ -15,9 +15,13 @@
 
 ## 版本
 
-当前稳定版：`v1.0.12`。
+当前维护版本：`v1.0.13`（模拟回归通过，Android 真机复测待完成）。
 
-最终版本 `v1.0.12` 修复了 thinking 模式下 reasoning 回传的两类 HTTP 400（`reasoning_text must be passed back` 与并行 `function_call` 之间插入 reasoning 导致的 `No tool output found`）。已在 Operit Android 真机验证：普通对话、reasoning、多轮串行工具调用，以及并行工具调用。
+此前的 `v1.0.12` 修复了 thinking 模式下 reasoning 回传的两类 HTTP 400（`reasoning_text must be passed back` 与并行 `function_call` 之间插入 reasoning 导致的 `No tool output found`）。已在 Operit Android 真机验证：普通对话、reasoning、多轮串行工具调用，以及并行工具调用。
+
+`v1.0.13` 统一实时转发与最终响应的事件累积，接收 delta、text.done、完整 output item 和 completed/incomplete 快照，兼容 `reasoning_text` / `reasoning_content`。最终 HTTP 响应重复已有 SSE 时不再重复累计；CRLF 和无空行结尾也能解析。思考继续通过 `<think>` 保存，续写时沿用插件既有的明文 `reasoning_text` 重建方式，不依赖服务端 item ID。
+
+本版验证使用本地模拟 HTTP/SSE，没有调用付费 DeepSeek API；不代表已完成内置 Provider 或本插件新版的 Android 真机验证。
 
 ## 安装
 
@@ -46,7 +50,8 @@ npm run build
 - 单调用和孤立调用取消兜底；
 - 连续 4 个 typed `TOOL_CALL` + 聚合 4 结果；
 - typed `TOOL_RESULT` 伪回显；
-- ASSISTANT 同 turn 的说明文字 + 工具 XML 回显。
+- ASSISTANT 同 turn 的说明文字 + 工具 XML 回显；
+- 直接加载生产代码的流式推理、完成快照、跨块/CRLF、去重和工具续写回归（含模拟实时与缓冲 HTTP 通道）。
 
 构建产物只包含运行所需文件：
 
@@ -69,6 +74,6 @@ dist/main.js          Provider 运行入口
 manifest.json         ToolPkg 元数据
 package.json          版本与开发命令
 scripts/build.sh      可移植构建脚本
-tests/                历史转换与配对回归
+tests/                生产代码的历史转换、流式生命周期与配对回归
 DEV_PLAN.md           维护记录与已知注意点
 ```

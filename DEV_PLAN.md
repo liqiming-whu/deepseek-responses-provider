@@ -208,3 +208,16 @@
 - 修复：v1.0.2 的 ASSISTANT merged-format 分支仅在确实存在结构化 `<tool_result>` 时配对结果；typed TOOL_RESULT 回显防护继续保留。
 - 自动验证：原配对、typed echo、assistant echo 三组测试均为 calls=4、outputs=4、cancelled=0、fake=0，values=A/B/C/D；语法检查通过。
 - 真机验证（用户截图，2026-08-13 13:55）：第一至第三轮及额外第四轮均为 4/4；关键观察明确为“无伪回显”“无 User cancelled”“没有任何工具结果缺失”。Bug 关闭。
+
+## 2026-10-18 v1.0.13：恢复维护与 Responses 流式生命周期修复
+
+- 恢复维护，移除 README 中的终止维护/最终版本措辞；不改变“独立插件与 Operit 内置 Provider 是不同实现”的说明。
+- 已复现旧版本缺口：仅 text.done / 完整 reasoning item / completed.output 携带的思考不会进入最终返回；CRLF SSE 在实时转发中不能分帧；缓冲 HTTP 通道只在最终 return 中保留思考，而工具 XML 中间结果可能让宿主忽略该 return。
+- 统一事件累积：delta 按 item/content part 保存，done 与 item/completed/incomplete 为快照，补全已接收的前缀而不重复追加。reasoning_text、reasoning_content 均可读取；沿用插件的 <think> 历史与 reasoning_text 续写格式，不新增伪造服务端 ID 或内置 Provider metadata 格式。
+- 实时与最终完整响应分别解析，再按真实身份关联快照对账；保留只在实时通道出现的内容。支持跨块 CRLF、末尾无空行、缺少 [DONE] 时的 HTTP EOF 收口。正文完成快照也不重复。
+- 同一请求中的不同 part、item_id/output_index 身份关联独立；已发送前缀与最终快照矛盾时明确返回错误，不悄悄构造混合内容。response.failed/error 不按成功工具响应处理。
+- 保持历史转换与并行工具批次逻辑；工具参数完成快照可补齐增量。移除诊断中输出 API key 前六位的字段。
+- 修复测试入口：移除固定 /root 路径和 /tmp 共享模块，历史测试通过 VM 直接加载生产函数；删除 reasoning 测试中的整份复制实现；将已有 SSE 测试和新生命周期测试纳入 npm test。
+- 新生命周期测试直接调用生产 sendMessage，模拟 http_request 中间块与最终响应，覆盖六类推理序列的实时/缓冲两通道，以及逐字符 CRLF、多 part、ID 关联、最终补全、只收实时、无中间回调、错误事件、正文快照与两轮并行工具回传。
+- 验证：npm run check、npm test；构建包只含 dist/main.js、manifest.json、package.json，两个版本字段一致。未调用 DeepSeek 付费 API，未改模型配置。
+- Android 真机：v1.0.13 待导入/重启后验证。v1.0.12 的历史真机记录不能作为新版通过证据；未宣称已复现或修复内置 Provider 的 Issue #1283。

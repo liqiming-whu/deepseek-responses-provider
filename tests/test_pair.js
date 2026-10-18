@@ -1,26 +1,6 @@
-// 逻辑验证：从 main.js 提取函数并模拟真实历史配对
-const fs = require('fs');
-const src = fs.readFileSync('/root/deepseek-responses-provider/dist/main.js', 'utf8');
-
-function extractFn(name) {
-  const start = src.indexOf('function ' + name);
-  const end = src.indexOf('\nfunction ', start + 10);
-  return src.slice(start, end > 0 ? end : src.length);
-}
-
-const parts = [
-  extractFn('splitThinking'),
-  extractFn('xmlUnescape'),
-  extractFn('extractToolCalls'),
-  extractFn('normalizeToolResultText'),
-  extractFn('extractToolResults'),
-  extractFn('extractToolResultsList'),
-  extractFn('buildResponsesInput'),
-  'module.exports = { buildResponsesInput };'
-];
-fs.writeFileSync('/tmp/pair_test.js', parts.join('\n'));
-const m = require('/tmp/pair_test.js');
-
+"use strict";
+// Load current production functions in an isolated Operit sandbox.
+const m = require("./load_provider")();
 // 模拟真实历史（随机后缀标签，对齐 histTail）
 const hist = [
   { kind: 'SYSTEM', content: 'system prompt' },
